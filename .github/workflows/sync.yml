@@ -1,0 +1,46 @@
+name: Check and update Lorcana
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: '补充遗漏到 Google 表格（关闭则仅检查）'
+        type: boolean
+        default: true
+permissions:
+  contents: read
+concurrency:
+  group: lorcana-google-sheet-sync
+  cancel-in-progress: false
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Test safety checks
+        run: python -m unittest discover -s tests -v
+      - name: Audit and sync
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}
+          APPLY: ${{ inputs.apply }}
+        shell: bash
+        run: |
+          if [ "$APPLY" = "true" ]; then
+            python sync_lorcana.py --apply
+          else
+            python sync_lorcana.py
+          fi
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f output/report.json ]; then
+            printf '```json\n' >> "$GITHUB_STEP_SUMMARY"
+            cat output/report.json >> "$GITHUB_STEP_SUMMARY"
+            printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
