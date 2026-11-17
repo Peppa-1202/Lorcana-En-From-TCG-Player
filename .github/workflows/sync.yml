@@ -21,6 +21,8 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+      - name: Install local OCR
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
       - run: pip install -r requirements.txt
       - name: Test safety checks
         run: python -m unittest discover -s tests -v
@@ -44,3 +46,10 @@ jobs:
             cat output/report.json >> "$GITHUB_STEP_SUMMARY"
             printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
           fi
+      - name: OCR audit files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lorcana-audit
+          path: output/
+          retention-days: 30

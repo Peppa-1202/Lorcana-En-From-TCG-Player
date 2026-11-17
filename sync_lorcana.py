@@ -17,6 +17,9 @@ SEARCH_URL = 'https://mp-search-api.tcgplayer.com/v1/search/request'
 DEFAULT_SHEET = ''
 HEADERS = ['商品 ID','系列名称','系列代码','卡牌编号','英文卡名','稀有度','墨水颜色','墨水费用','可放墨水区','卡牌类型','角色分类','力量','意志力','传说值','移动费用','效果文本','背景文本','所属作品','市场价 USD','最低价 USD','最低含运费 USD','在售 listings 数','商品链接','卡图链接','采集日期','备注']
 
+BASE_HEADERS = HEADERS.copy()
+HEADERS = HEADERS + ['卡牌代码']
+
 def search(start=0, size=50, set_slug=None):
     term = {'productLineName':['lorcana-tcg'], 'productTypeName':['Cards']}
     if set_slug:
@@ -136,17 +139,21 @@ def main():
         from sheets_sync import connect, read_rows
         service = connect()
         rows = read_rows(service, args.spreadsheet_id)
-        if rows[0] != HEADERS:
+        if rows[0] not in (BASE_HEADERS, HEADERS):
             raise RuntimeError('Sheet headers changed; refusing write')
     products = json.loads(Path(args.catalog_json).read_text(encoding='utf-8')) if args.catalog_json else collect_catalog()
     (out/'catalog.json').write_text(json.dumps(products,ensure_ascii=False),encoding='utf-8')
     missing, report = compare(rows, products)
     (out/'missing_rows.json').write_text(json.dumps(missing,ensure_ascii=False,indent=2),encoding='utf-8')
+    from promo_ocr import scan, summary
+    promo = scan(rows[1:] + missing)
+    (out/'promo_ocr.json').write_text(json.dumps(promo,ensure_ascii=False,indent=2),encoding='utf-8')
+    report['promo_codes'] = summary(promo)
     report['checked_at'] = datetime.now(ZoneInfo('Asia/Shanghai')).isoformat()
     report['applied'] = False
     if args.apply:
         from sheets_sync import apply_missing
-        apply_missing(service,args.spreadsheet_id,rows,missing)
+        apply_missing(service,args.spreadsheet_id,rows,missing,promo)
         report['applied'] = True
         report['sheet_count_after'] = report['sheet_count'] + len(missing)
     (out/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')

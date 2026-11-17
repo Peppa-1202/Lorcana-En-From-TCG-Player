@@ -39,12 +39,12 @@ $env:SPREADSHEET_ID = 'YOUR_SPREADSHEET_ID'
 python sync_lorcana.py --apply
 ```
 
-本地结果在 `output/`：`catalog.json`、`missing_rows.json`、`report.json`。该目录已被 Git 忽略。Actions 仅输出检查摘要，不向公共仓库提交表格内容、数据快照或凭据。
+本地结果在 `output/`：`catalog.json`、`missing_rows.json`、`report.json`。该目录已被 Git 忽略。Actions 输出检查摘要，并提供保留 30 天的 lorcana-audit 运行附件（包括目录快照及 OCR 结果）；不把运行数据或凭据提交到 Git。
 
 ## 更新规则
 
-- 明细页：`洛卡纳TCG`；目录页：`洛卡纳TCG目录`；26 列表头必须与脚本定义一致。
-- 只追加新商品，不覆盖已有卡牌、备注或价格，不删除仅存在于表格的商品；`洛卡纳Player` 不参与更新。
+- 明细页：`洛卡纳TCG`；目录页：`洛卡纳TCG目录`；原 26 列表头必须与脚本定义一致；首次运行自动增加 AA 列“卡牌代码”，之后为 27 列。
+- 追加新商品，并补充 Promo 的“卡牌代码”；不覆盖已有卡牌属性、备注或价格，不删除仅存在于表格的商品；`洛卡纳Player` 不参与更新。
 - 价格是新记录采集时的快照，不是全表实时价格刷新。属性为空时保留为空，不虚构内容。
 - 系列代码优先沿用表格同系列的代码（例如 DLPC），新系列使用来源的 setCode。
 - 目录保留原有说明、统计公式和采集日期，扩展统计范围，新增“最近完整性核查”日期；新系列插入合计行之前。
@@ -62,3 +62,19 @@ python sync_lorcana.py --apply
 遇到 HTTP 403/429 或超时请稍后重跑，不要提高并发。凭据错误检查 Secret、Sheets API 和表格共享权限。新表头、公式、验证或智能芯片结构会触发安全停止，需要检查映射。
 
 参考：[Sheets batchUpdate](https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets/batchUpdate)、[GitHub 手动运行工作流](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)。
+
+## Promo 图片代码与子类汇总
+
+每次成功执行 `--apply` 会同步更新明细和目录，无需另运行汇总脚本。已配置的 Google Secret/Variable 可以继续使用。
+
+- AA 列 **卡牌代码** 保存图片左下角完整代码，例如 `20/C2·EN·10`、`24A/P2·EN·7`。P1/P2/P3/P4、C1/C2/C3、CC1/CC2、PD1、DIS、RPH 等按图片实际前缀自动分组，不预设固定清单。
+- 只处理 `Disney Lorcana Promo Cards`。其他系列的 AA 列留空。语言依图片保留 EN/JA/ZH 等，不根据商品页面语言改写。
+- 目录在 DLPC 父行下插入浅蓝色子类行。父行包含全部 Promo 商品；总计只计明细商品 ID，子类不会重复相加。不同商品 ID 使用相同代码时仍各计一次。
+- 组合商品在同一格用英文分号保存多个代码。同子类组合只计一条商品；不拆成多行。仅印有 `JA·14` 等语言/版次的商品归“无编号”。
+- 已人工核对的 217 条公开卡图记录保存在 `promo_codes_reviewed.json`，含图片 SHA-256；首次填充时必须图片哈希一致才复用。后续保留表格中已有效填写的代码（也保留人工修正），只重试空白、格式无效或“待核查”的行。若需重新识别已填代码，请先清空对应 AA 单元格。
+- 新图片使用本地 Tesseract，多次裁剪识别一致且格式完整才接受；反光、低清、遮挡、特殊排版可能识别失败，写为“待核查”。不会用卡名或网页编号猜测。当前 Stand Out（714566）图片反光，仍需人工确认。
+- 单元格备注记录识别来源；运行 Summary 显示识别数、待核查数及子类数。`output/promo_ocr.json` 保存 OCR 原文、错误和图片哈希供复核。无法识别不阻断其他完整商品的补录。
+
+GitHub Actions 自动安装 Tesseract，无需额外密钥。本地运行需先安装 **Tesseract OCR（含 eng 数据）** 并让 `tesseract` 在 PATH 中，例如 Ubuntu：`sudo apt-get install tesseract-ocr tesseract-ocr-eng`。Pillow 随 requirements 安装。
+
+识别结果是图片辅助转录，不保证未来所有图片自动识别成功；待核查数量会明确保留在目录中。
