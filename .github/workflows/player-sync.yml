@@ -1,0 +1,53 @@
+name: Check and update LorcanaPlayer
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: '补录 LorcanaPlayer 缺失卡牌并更新目录（关闭则仅检查）'
+        type: boolean
+        default: true
+permissions:
+  contents: read
+concurrency:
+  group: lorcanaplayer-google-sheet-sync
+  cancel-in-progress: false
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Test safety checks
+        run: python -m unittest discover -s tests -v
+      - name: Audit and sync LorcanaPlayer
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}
+          APPLY: ${{ inputs.apply }}
+        shell: bash
+        run: |
+          if [ "$APPLY" = "true" ]; then
+            python -u sync_lorcanaplayer.py --apply
+          else
+            python -u sync_lorcanaplayer.py
+          fi
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f output/player/report.json ]; then
+            printf '```json\n' >> "$GITHUB_STEP_SUMMARY"
+            cat output/player/report.json >> "$GITHUB_STEP_SUMMARY"
+            printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Audit files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lorcanaplayer-audit
+          path: output/player/
+          retention-days: 30
