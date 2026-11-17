@@ -30,8 +30,10 @@ class PromoTests(unittest.TestCase):
         self.assertEqual(requests[0]['appendDimension']['dimension'],'COLUMNS')
         self.assertTrue(any('COUNTA(' in str(x) for x in requests))
         self.assertTrue(any('*/P2·*' in str(x) for x in requests))
+        series=[r['updateCells'] for r in requests if r.get('updateCells',{}).get('start',{}).get('columnIndex')==27]
+        self.assertEqual([r['rows'][0]['values'][0]['userEnteredValue']['stringValue'] for r in series],['促销卡系列代码','P2',PENDING])
         directory[5:5]=[['P2','↳ DLPC / P2',1],[PENDING,'↳ DLPC / '+PENDING,1]]
-        meta['sheets'][0]['properties']['gridProperties']['columnCount']=27
+        meta['sheets'][0]['properties']['gridProperties']['columnCount']=28
         repeated=build_requests(meta,rows,[],directory,[],promo)
         self.assertFalse(any('insertDimension' in r or 'appendDimension' in r for r in repeated))
         self.assertTrue(any('1 个系列/产品分类' in str(r) for r in repeated))

@@ -18,7 +18,8 @@ DEFAULT_SHEET = ''
 HEADERS = ['商品 ID','系列名称','系列代码','卡牌编号','英文卡名','稀有度','墨水颜色','墨水费用','可放墨水区','卡牌类型','角色分类','力量','意志力','传说值','移动费用','效果文本','背景文本','所属作品','市场价 USD','最低价 USD','最低含运费 USD','在售 listings 数','商品链接','卡图链接','采集日期','备注']
 
 BASE_HEADERS = HEADERS.copy()
-HEADERS = HEADERS + ['卡牌代码']
+CODE_HEADERS = BASE_HEADERS + ['卡牌代码']
+HEADERS = CODE_HEADERS + ['促销卡系列代码']
 
 def search(start=0, size=50, set_slug=None):
     term = {'productLineName':['lorcana-tcg'], 'productTypeName':['Cards']}
@@ -139,7 +140,7 @@ def main():
         from sheets_sync import connect, read_rows
         service = connect()
         rows = read_rows(service, args.spreadsheet_id)
-        if rows[0] not in (BASE_HEADERS, HEADERS):
+        if rows[0] not in (BASE_HEADERS, CODE_HEADERS, HEADERS):
             raise RuntimeError('Sheet headers changed; refusing write')
     products = json.loads(Path(args.catalog_json).read_text(encoding='utf-8')) if args.catalog_json else collect_catalog()
     (out/'catalog.json').write_text(json.dumps(products,ensure_ascii=False),encoding='utf-8')

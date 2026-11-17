@@ -20,7 +20,7 @@ def connect():
 def read_rows(service, sid):
     meta = service.get(spreadsheetId=sid,fields='sheets.properties').execute()
     sheet = next(s['properties'] for s in meta['sheets'] if s['properties']['title']==DETAIL)
-    last = 'AA' if sheet['gridProperties']['columnCount'] >= 27 else 'Z'
+    last = 'AB' if sheet['gridProperties']['columnCount'] >= 28 else 'AA' if sheet['gridProperties']['columnCount'] >= 27 else 'Z'
     return service.values().get(spreadsheetId=sid,range=f"'{DETAIL}'!A1:{last}{sheet['gridProperties']['rowCount']}",valueRenderOption='UNFORMATTED_VALUE').execute().get('values',[])
 
 def cell(value):
@@ -111,17 +111,22 @@ def build_requests(meta,rows,missing,directory,exemplar,promo=None):
         requests.append({'updateCells':{'start':{'sheetId':did,'rowIndex':n,'columnIndex':0},'rows':new_cells,'fields':'userEnteredValue,userEnteredFormat'}})
     requests.extend(directory_requests(dsid, rows[1:]+missing, directory, end, promo))
     if promo is not None:
-        if prop['gridProperties'].get('columnCount',26)<27:
-            requests.insert(0,{'appendDimension':{'sheetId':did,'dimension':'COLUMNS','length':27-prop['gridProperties'].get('columnCount',26)}})
+        if prop['gridProperties'].get('columnCount',26)<28:
+            requests.insert(0,{'appendDimension':{'sheetId':did,'dimension':'COLUMNS','length':28-prop['gridProperties'].get('columnCount',26)}})
         requests.append(update(did,0,26,['卡牌代码']))
         requests.append({'repeatCell':{'range':{'sheetId':did,'startColumnIndex':26,'endColumnIndex':27},'cell':{'userEnteredFormat':{'numberFormat':{'type':'TEXT'},'textFormat':{'fontFamily':'Arial','fontSize':10},'verticalAlignment':'MIDDLE','wrapStrategy':'CLIP'}},'fields':'userEnteredFormat'}})
         requests.append({'copyPaste':{'source':{'sheetId':did,'startRowIndex':0,'endRowIndex':1,'startColumnIndex':25,'endColumnIndex':26},'destination':{'sheetId':did,'startRowIndex':0,'endRowIndex':1,'startColumnIndex':26,'endColumnIndex':27},'pasteType':'PASTE_FORMAT'}})
         requests.append({'updateDimensionProperties':{'range':{'sheetId':did,'dimension':'COLUMNS','startIndex':26,'endIndex':27},'properties':{'pixelSize':220},'fields':'pixelSize'}})
+        from promo_ocr import subtype
+        requests.append(update(did,0,27,['促销卡系列代码']))
+        requests.append({'copyPaste':{'source':{'sheetId':did,'startColumnIndex':26,'endColumnIndex':27,'startRowIndex':0,'endRowIndex':end},'destination':{'sheetId':did,'startColumnIndex':27,'endColumnIndex':28,'startRowIndex':0,'endRowIndex':end},'pasteType':'PASTE_FORMAT'}})
+        requests.append({'updateDimensionProperties':{'range':{'sheetId':did,'dimension':'COLUMNS','startIndex':27,'endIndex':28},'properties':{'pixelSize':150},'fields':'pixelSize'}})
         for i,row in enumerate(rows[1:]+missing,1):
             result=promo.get(str(row[0])) if row else None
             if result:
                 c=cell(result['code']); c['note']='卡图左下角代码；来源：'+result['source']+('；'+result['error'] if result.get('error') else '')
                 requests.append({'updateCells':{'start':{'sheetId':did,'rowIndex':i,'columnIndex':26},'rows':[{'values':[c]}],'fields':'userEnteredValue,note'}})
+                requests.append(update(did,i,27,[subtype(result['code'])]))
     if missing:
         for table in detail.get('tables',[]):
             rng=table['range']
@@ -130,8 +135,8 @@ def build_requests(meta,rows,missing,directory,exemplar,promo=None):
         basic=detail.get('basicFilter')
         if basic and basic['range'].get('endRowIndex')==n:
             basic=deepcopy(basic);basic['range']['endRowIndex']=end
-            if promo is not None and basic['range'].get('endColumnIndex')==26:
-                basic['range']['endColumnIndex']=27
+            if promo is not None and basic['range'].get('endColumnIndex') in (26,27):
+                basic['range']['endColumnIndex']=28
             if basic.get('filterSpecs'):
                 basic.pop('criteria',None)
             requests.append({'setBasicFilter':{'filter':basic}})
@@ -153,9 +158,10 @@ def apply_missing(service,sid,rows,missing,promo=None):
     if actual != expected:
         raise RuntimeError('Write verification failed; inspect Sheet before retry')
     if promo is not None:
+        from promo_ocr import subtype
         for row in current[1:]:
             expected_code=promo.get(str(row[0])) if row else None
-            if expected_code and (len(row)<27 or row[26]!=expected_code['code']):
+            if expected_code and (len(row)<28 or row[26]!=expected_code['code'] or row[27]!=subtype(expected_code['code'])):
                 raise RuntimeError('Promo code write verification failed')
     for want,got in zip(missing,current[len(rows):]):
         got=got[:26]
