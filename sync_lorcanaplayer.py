@@ -246,6 +246,9 @@ def make_requests(meta,rows,missing,catalog,report,exemplar,directory_before):
         basic=deepcopy(basic);basic['range']['endRowIndex']=len(after)
         if basic.get('filterSpecs'):basic.pop('criteria',None)
         requests.append({'setBasicFilter':{'filter':basic}})
+    from directory_changes import change_requests
+    requests.extend(change_requests(props[DIRECTORY], directory_before,
+                                   [r[1] for r in directory[4:len(directory)-6]], height))
     return requests,after,directory
 
 def read_rows(service,sid):
@@ -256,7 +259,7 @@ def read_rows(service,sid):
 def apply(service,sid,rows,missing,catalog,report):
     if read_rows(service,sid)!=rows:raise RuntimeError('Sheet changed during audit; rerun')
     meta=service.get(spreadsheetId=sid,includeGridData=False).execute()
-    directory=service.values().get(spreadsheetId=sid,range=f"'{DIRECTORY}'!A1:D200",valueRenderOption='UNFORMATTED_VALUE').execute().get('values',[])
+    directory=service.values().get(spreadsheetId=sid,range=f"'{DIRECTORY}'!A1:H200",valueRenderOption='UNFORMATTED_VALUE').execute().get('values',[])
     if directory and directory[0] and directory[0][0]!='LorcanaPlayer 卡牌目录':raise RuntimeError('Directory contains unexpected data; refusing overwrite')
     last=max(i for i,r in enumerate(rows) if r and r[0])+1
     source=service.get(spreadsheetId=sid,ranges=[f"'{DETAIL}'!A{last}:Z{last}"],includeGridData=True).execute()

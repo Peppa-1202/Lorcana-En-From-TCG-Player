@@ -32,7 +32,7 @@ def update(sid,row,col,values,formula=False):
     cells = [{'userEnteredValue':{'formulaValue':v}} if formula else cell(v) for v in values]
     return {'updateCells':{'start':{'sheetId':sid,'rowIndex':row,'columnIndex':col},'rows':[{'values':cells}],'fields':'userEnteredValue'}}
 
-def directory_requests(dsid, all_rows, directory, end, promo):
+def directory_requests(dsid, all_rows, directory, end, promo, sheet=None):
     from promo_ocr import PROMO, PENDING, subtype
     import re
     marker='↳ DLPC / '
@@ -82,6 +82,9 @@ def directory_requests(dsid, all_rows, directory, end, promo):
     date=datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat()
     check_idx=next((i for i,r in enumerate(directory) if r and r[0]=='最近完整性核查'),len(directory))
     req.append(update(dsid,check_idx+delta,0,['最近完整性核查',date]))
+    from directory_changes import change_requests
+    req.extend(change_requests(sheet or {"properties": {"sheetId": dsid}}, directory,
+                               [r[1] for r in output]+["合计"], len(directory)+delta))
     return req
 
 def build_requests(meta,rows,missing,directory,exemplar,promo=None):
@@ -109,7 +112,7 @@ def build_requests(meta,rows,missing,directory,exemplar,promo=None):
         new_cells.append({'values':cells})
     if new_cells:
         requests.append({'updateCells':{'start':{'sheetId':did,'rowIndex':n,'columnIndex':0},'rows':new_cells,'fields':'userEnteredValue,userEnteredFormat'}})
-    requests.extend(directory_requests(dsid, rows[1:]+missing, directory, end, promo))
+    requests.extend(directory_requests(dsid, rows[1:]+missing, directory, end, promo, sheets[DIRECTORY]))
     if promo is not None:
         if prop['gridProperties'].get('columnCount',26)<28:
             requests.insert(0,{'appendDimension':{'sheetId':did,'dimension':'COLUMNS','length':28-prop['gridProperties'].get('columnCount',26)}})
@@ -146,7 +149,7 @@ def apply_missing(service,sid,rows,missing,promo=None):
     if read_rows(service,sid)!=rows:
         raise RuntimeError('Sheet changed during audit; rerun')
     meta=service.get(spreadsheetId=sid,includeGridData=False).execute()
-    directory=service.values().get(spreadsheetId=sid,range=f"'{DIRECTORY}'!A1:D200",valueRenderOption='UNFORMATTED_VALUE').execute().get('values',[])
+    directory=service.values().get(spreadsheetId=sid,range=f"'{DIRECTORY}'!A1:H200",valueRenderOption='UNFORMATTED_VALUE').execute().get('values',[])
     data=service.get(spreadsheetId=sid,ranges=[f"'{DETAIL}'!A{len(rows)}:Z{len(rows)}"],includeGridData=True).execute()
     exemplar=data['sheets'][0]['data'][0]['rowData'][0]['values']
     requests=build_requests(meta,rows,missing,directory,exemplar,promo)
