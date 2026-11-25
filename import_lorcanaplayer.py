@@ -31,7 +31,7 @@ def source_url(value, path_pattern):
     )
 
 
-def parse_batch(raw):
+def decode_browser_payload(raw):
     if len(raw.encode('utf-8')) > 60000:
         raise ValueError('Browser batch is over 60 KB; split it into smaller batches')
     if raw.startswith('gzip:'):
@@ -47,8 +47,12 @@ def parse_batch(raw):
     batch = json.loads(raw)
     if (not isinstance(batch, dict) or type(batch.get('version')) is not int
             or batch['version'] != 1):
-        raise ValueError('Expected a LorcanaPlayer browser batch with version 1')
-    cards = batch.get('cards')
+        raise ValueError('Expected a LorcanaPlayer browser payload with version 1')
+    return batch
+
+
+def parse_batch(raw):
+    cards = decode_browser_payload(raw).get('cards')
     if not isinstance(cards, list) or not cards:
         raise ValueError('Browser batch must contain at least one card')
 
@@ -83,6 +87,42 @@ def parse_batch(raw):
         )
         urls.add(url.rstrip('/'))
     return records
+
+
+def compare_catalog(raw, rows):
+    catalog = decode_browser_payload(raw).get('catalog')
+    if not isinstance(catalog, dict):
+        raise ValueError('Expected a complete browser catalogue scan')
+    total = catalog.get('total')
+    ids = catalog.get('ids')
+    if (type(total) is not int or total < 1 or not isinstance(ids, list)
+            or len(ids) != total or any(not isinstance(pid, str)
+            or not re.fullmatch(r'[1-9][0-9]{0,19}', pid) for pid in ids)
+            or len(set(ids)) != total):
+        raise ValueError('Catalogue total and unique page IDs do not match')
+    try:
+        checked = datetime.fromisoformat(catalog['checked_at'].replace('Z', '+00:00'))
+    except (KeyError, AttributeError, ValueError) as exc:
+        raise ValueError('Expected the browser scan timestamp') from exc
+    if checked.tzinfo is None:
+        raise ValueError('Expected a timezone in the browser scan timestamp')
+    tz = ZoneInfo('Asia/Shanghai')
+    checked_on = checked.astimezone(tz).date()
+    if checked_on > datetime.now(tz).date():
+        raise ValueError('Browser scan date is in the future')
+    known = set(existing_ids(rows)['ids'])
+    website = set(ids)
+    return ({
+        'checked_on': checked_on.isoformat(),
+        'total': total,
+        'sheet_only_count': len(known - website),
+    }, {
+        'website_count': total,
+        'sheet_count': len(known),
+        'missing_ids': sorted(website - known, key=int),
+        'sheet_only_ids': sorted(known - website, key=int),
+        'checked_on': checked_on.isoformat(),
+    })
 
 
 def audit_rows(rows, records):
@@ -146,11 +186,11 @@ def read_directory(service, spreadsheet_id, end_cell):
     ).execute().get('values', [])
 
 
-def directory_plan(service, spreadsheet_id, meta, rows):
+def directory_plan(service, spreadsheet_id, meta, rows, website_audit=None):
     sheet = next(sheet for sheet in meta['sheets'] if sheet['properties']['title'] == DIRECTORY)
     height = sheet['properties']['gridProperties']['rowCount']
     before = read_directory(service, spreadsheet_id, f'H{height}')
-    return sheet, before, incremental_directory(rows, before)
+    return sheet, before, incremental_directory(rows, before, website_audit)
 
 
 def normalize(rows, width):
@@ -158,14 +198,14 @@ def normalize(rows, width):
             + [''] * (width - len(row)) for row in rows]
 
 
-def apply_rows(service, spreadsheet_id, before, missing, *, refresh_directory=False):
+def apply_rows(service, spreadsheet_id, before, missing, *, refresh_directory=False, website_audit=None):
     if not missing and not refresh_directory:
         return False
     if read_rows(service, spreadsheet_id) != before:
         raise RuntimeError('Sheet changed during audit; rerun to refresh the preview')
     meta = service.get(spreadsheetId=spreadsheet_id, includeGridData=False).execute()
     requests, expected = detail_updates(service, spreadsheet_id, meta, before, missing) if missing else ([], before)
-    directory_sheet, directory_before, directory_after = directory_plan(service, spreadsheet_id, meta, expected)
+    directory_sheet, directory_before, directory_after = directory_plan(service, spreadsheet_id, meta, expected, website_audit)
     if directory_after is not None:
         requests.extend(make_directory_requests(directory_sheet, directory_after, directory_before))
     if not requests:
@@ -196,6 +236,7 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--export-ids', action='store_true')
     mode.add_argument('--refresh-directory', action='store_true')
+    mode.add_argument('--audit-catalog', action='store_true')
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     if not args.spreadsheet_id:
@@ -211,21 +252,25 @@ def main():
         )
         print(f"Exported {len(index['ids'])} existing LorcanaPlayer page IDs", flush=True)
         return
-    if args.refresh_directory:
+    if args.refresh_directory or args.audit_catalog:
         service = connect()
         rows = read_rows(service, args.spreadsheet_id)
-        known = existing_ids(rows)
+        website_audit = None
+        report = {'mode': 'directory_refresh', 'sheet_count': len(existing_ids(rows)['ids'])}
+        if args.audit_catalog:
+            try:
+                raw = args.batch_file.read_text(encoding='utf-8-sig') if args.batch_file else os.getenv('LORCANAPLAYER_BATCH_JSON', '')
+                website_audit, comparison = compare_catalog(raw, rows)
+            except (OSError, ValueError) as exc:
+                parser.error(str(exc))
+            report.update(comparison, mode='catalog_audit')
         meta = service.get(spreadsheetId=args.spreadsheet_id, includeGridData=False).execute()
-        _, _, planned = directory_plan(service, args.spreadsheet_id, meta, rows)
-        updated = args.apply and apply_rows(service, args.spreadsheet_id, rows, [], refresh_directory=True)
-        report = {
-            'mode': 'directory_refresh',
-            'sheet_count': len(known['ids']),
-            'directory_update_needed': planned is not None,
-            'directory_updated': updated,
-            'applied': args.apply,
-            'rows_added': 0,
-        }
+        _, _, planned = directory_plan(service, args.spreadsheet_id, meta, rows, website_audit)
+        updated = args.apply and apply_rows(
+            service, args.spreadsheet_id, rows, [], refresh_directory=True, website_audit=website_audit,
+        )
+        report.update(directory_update_needed=planned is not None, directory_updated=updated,
+                      applied=args.apply, rows_added=0)
     else:
         try:
             raw = args.batch_file.read_text(encoding='utf-8-sig') if args.batch_file else os.getenv('LORCANAPLAYER_BATCH_JSON', '')

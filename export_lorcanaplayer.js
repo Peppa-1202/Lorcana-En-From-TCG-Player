@@ -143,11 +143,14 @@
         if (final.total !== first.total || JSON.stringify(final.cards) !== JSON.stringify(first.cards)) {
             throw new Error('检查期间网站第一页变化，请刷新后重试。');
         }
-        return [...byId.values()].filter(({id}) => !known.has(id));
+        return {
+            missing: [...byId.values()].filter(({id}) => !known.has(id)),
+            catalog: {total: first.total, checked_at: new Date().toISOString(), ids: [...byId.keys()]},
+        };
     }
 
-    async function pack(cards) {
-        const bytes = new TextEncoder().encode(toPayload(cards));
+    async function pack(text) {
+        const bytes = new TextEncoder().encode(text);
         if (bytes.length > 2_000_000) return null;
         if (bytes.length <= 58_000) return new TextDecoder().decode(bytes);
         const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'));
@@ -161,7 +164,7 @@
     }
 
     async function splitBatches(cards) {
-        const payload = await pack(cards);
+        const payload = await pack(toPayload(cards));
         if (payload !== null) return [{count: cards.length, payload}];
         if (cards.length === 1) throw new Error('单张详情太大，无法通过 GitHub 表单提交。');
         const middle = Math.ceil(cards.length / 2);
@@ -214,15 +217,15 @@
         status.textContent = message;
     }
 
-    function renderBatch({count, payload}, index) {
-        const row = element('p', '批次 ' + (index + 1) + '（' + count + ' 张） ', results);
+    function renderPayload(label, payload) {
+        const row = element('p', label + ' ', results);
         const button = element('button', '复制到剪贴板', row);
         const box = element('textarea', '', results);
         box.value = payload;
         box.readOnly = true;
         box.style.width = '100%';
         box.rows = 2;
-        box.setAttribute('aria-label', '批次 ' + (index + 1) + ' 内容');
+        box.setAttribute('aria-label', label + ' 内容');
         button.onclick = async () => {
             try {
                 await navigator.clipboard.writeText(payload);
@@ -251,7 +254,14 @@
                 || new Set(incoming.ids).size !== incoming.ids.length) {
                 throw new Error('请使用 GitHub 导出的表内 ID JSON。');
             }
-            missing = await findMissing(new Set(incoming.ids), controller.signal, report);
+            const scan = await findMissing(new Set(incoming.ids), controller.signal, report);
+            missing = scan.missing;
+            const cataloguePayload = await pack(JSON.stringify({version: 1, catalog: scan.catalog}));
+            if (cataloguePayload !== null) {
+                renderPayload('全量核查凭据（GitHub 选 audit_catalog）', cataloguePayload);
+            } else {
+                element('p', '目录凭据超出 GitHub 表单大小。卡牌补录仍可分批提交。', results);
+            }
             if (!missing.length) {
                 report('目录检查完成，没有缺卡。');
                 return;
@@ -278,7 +288,11 @@
                 + (missing ? ' 已取到 ' + captured.length + ' / ' + missing.length + ' 张。' : ''));
         } finally {
             try {
-                if (captured.length) (await splitBatches(captured)).forEach(renderBatch);
+                if (captured.length) {
+                    (await splitBatches(captured)).forEach(({count, payload}, index) => {
+                        renderPayload('补录批次 ' + (index + 1) + '（' + count + ' 张）', payload);
+                    });
+                }
             } catch (error) {
                 report('打包失败：' + String(error.message || error));
             }

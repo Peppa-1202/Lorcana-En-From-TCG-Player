@@ -241,7 +241,7 @@ def directory_rows(rows,catalog,report):
     output.extend([['',DIRECTORY_TOTAL,sum(bool(r and r[0]) for r in rows[1:]),'同一卡牌多系列归属不重复计入此合计；系列行不可直接相加作为卡牌总数。'],['','','',''],['网站当前卡牌数',catalog['total'],'',''],['最近完整性核查',date,'',''],['本次补录数',len(report['missing_ids']),'',''],['仅表格存在数',len(report['sheet_only_ids']),'','不自动删除。'],['数据来源',BASE+'/cards/','','']])
     return output
 
-def incremental_directory(rows, before):
+def incremental_directory(rows, before, website_audit=None):
     """Refresh directory counts from the detail sheet and retain website audit facts."""
     old_rows = [[('' if value is None else value) for value in row[:4]]
                 + [''] * (4 - len(row[:4])) for row in before]
@@ -258,7 +258,7 @@ def incremental_directory(rows, before):
             raise RuntimeError('Unexpected category name or count in the directory')
         audit_labels = {'网站当前卡牌数', '上次核查的网站卡牌数', '最近完整性核查',
                         '本次补录数', '本次合计变化', '仅表格存在数',
-                        '上次核查仅表格存在数', '数据来源'}
+                        '上次核查仅表格存在数', '数据来源', '当前表内卡牌数', '最近目录更新'}
         audit_rows = [row for row in old_rows[total_index + 1:] if any(row)]
         if any(row[0] not in audit_labels for row in audit_rows):
             raise RuntimeError('Directory contains unexpected data below the total')
@@ -274,7 +274,24 @@ def incremental_directory(rows, before):
     changed = [name for name, records in groups.items()
                if name not in previous or len(records) != previous[name][2]]
     count = sum(bool(row and row[0]) for row in rows[1:])
-    if not changed and count == old_total[2] and audit:
+    counts_changed = bool(changed) or count != old_total[2]
+    last_website_total = audit.get('上次核查的网站卡牌数',
+                                   audit.get('网站当前卡牌数', ['', '', '', '']))[1]
+    last_audit_date = audit.get('最近完整性核查', ['', '', '', ''])[1]
+    last_sheet_only = audit.get('上次核查仅表格存在数',
+                                audit.get('仅表格存在数', ['', '', '', '']))[1]
+    new_audit = False
+    if website_audit is not None:
+        checked_on = website_audit['checked_on']
+        if last_audit_date and str(last_audit_date) > checked_on:
+            raise RuntimeError('Browser catalogue is older than the last recorded audit')
+        new_audit = (last_website_total, last_audit_date, last_sheet_only) != (
+            website_audit['total'], checked_on, website_audit['sheet_only_count']
+        )
+        last_website_total = website_audit['total']
+        last_audit_date = checked_on
+        last_sheet_only = website_audit['sheet_only_count']
+    if not counts_changed and not new_audit and '最近目录更新' in audit and '当前表内卡牌数' in audit:
         return None
 
     directory = [
@@ -298,11 +315,14 @@ def incremental_directory(rows, before):
     directory.extend([
         [old_total[0], DIRECTORY_TOTAL, count, old_total[3]],
         ['', '', '', ''],
-        ['上次核查的网站卡牌数', *audit.get('上次核查的网站卡牌数', audit.get('网站当前卡牌数', ['', '', '', '']))[1:]],
-        audit.get('最近完整性核查', ['最近完整性核查', '', '', '']),
-        ['本次合计变化', count - old_total[2], '', ''],
-        ['上次核查仅表格存在数', *audit.get('上次核查仅表格存在数', audit.get('仅表格存在数', ['', '', '', '']))[1:]],
+        ['上次核查的网站卡牌数', last_website_total, '', ''],
+        ['最近完整性核查', last_audit_date, '', ''],
+        ['本次合计变化', count - old_total[2] if counts_changed
+         else audit.get('本次合计变化', audit.get('本次补录数', ['', 0]))[1], '', ''],
+        ['上次核查仅表格存在数', last_sheet_only, '', ''],
         audit.get('数据来源', ['数据来源', BASE + '/cards/', '', '']),
+        ['当前表内卡牌数', count, '', ''],
+        ['最近目录更新', datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M'), '', ''],
     ])
     return directory
 
@@ -379,6 +399,7 @@ def make_directory_requests(sheet, directory, directory_before):
     dprop = sheet['properties']
     dsid = dprop['sheetId']
     requests = []
+    total_index = next(i for i, row in enumerate(directory[4:], 4) if row[1] == DIRECTORY_TOTAL)
     if len(directory) > dprop['gridProperties']['rowCount']:
         requests.append({'appendDimension': {
             'sheetId': dsid, 'dimension': 'ROWS',
@@ -388,16 +409,16 @@ def make_directory_requests(sheet, directory, directory_before):
     data=directory+[['','','','']]*(height-len(directory))
     requests.append({'updateCells':{'range':{'sheetId':dsid,'startRowIndex':0,'endRowIndex':height,'startColumnIndex':0,'endColumnIndex':4},'rows':[{'values':[cell(v) for v in r]} for r in data],'fields':'userEnteredValue'}})
     requests.append({'repeatCell':{'range':{'sheetId':dsid,'startRowIndex':0,'endRowIndex':height,'startColumnIndex':0,'endColumnIndex':4},'cell':{'userEnteredFormat':{'textFormat':{'fontFamily':'Arial','fontSize':10},'backgroundColor':{'red':1,'green':1,'blue':1},'wrapStrategy':'WRAP','verticalAlignment':'MIDDLE'}},'fields':'userEnteredFormat'}})
-    for row in (3,len(directory)-7):
+    for row in (3,total_index):
         requests.append({'repeatCell':{'range':{'sheetId':dsid,'startRowIndex':row,'endRowIndex':row+1,'startColumnIndex':0,'endColumnIndex':4},'cell':{'userEnteredFormat':{'backgroundColor':{'red':.9,'green':.9,'blue':.9},'textFormat':{'bold':True}}},'fields':'userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold'}})
     for top in (0,1):
         merged={'sheetId':dsid,'startRowIndex':top,'endRowIndex':top+1,'startColumnIndex':0,'endColumnIndex':4}
         if merged not in sheet.get('merges',[]):
             requests.append({'mergeCells':{'range':merged,'mergeType':'MERGE_ALL'}})
-    requests.append({'repeatCell':{'range':{'sheetId':dsid,'startRowIndex':4,'endRowIndex':len(directory)-6,'startColumnIndex':2,'endColumnIndex':3},'cell':{'userEnteredFormat':{'numberFormat':{'type':'NUMBER','pattern':'#,##0'}}},'fields':'userEnteredFormat.numberFormat'}})
+    requests.append({'repeatCell':{'range':{'sheetId':dsid,'startRowIndex':4,'endRowIndex':total_index+1,'startColumnIndex':2,'endColumnIndex':3},'cell':{'userEnteredFormat':{'numberFormat':{'type':'NUMBER','pattern':'#,##0'}}},'fields':'userEnteredFormat.numberFormat'}})
     directory_filter = deepcopy(sheet.get('basicFilter', {}))
     directory_filter['range'] = {
-        'sheetId': dsid, 'startRowIndex': 3, 'endRowIndex': len(directory)-7,
+        'sheetId': dsid, 'startRowIndex': 3, 'endRowIndex': total_index,
         'startColumnIndex': 0, 'endColumnIndex': 4,
     }
     if directory_filter.get('filterSpecs'):
@@ -407,9 +428,14 @@ def make_directory_requests(sheet, directory, directory_before):
         requests.append({'updateDimensionProperties':{'range':{'sheetId':dsid,'dimension':'COLUMNS','startIndex':index,'endIndex':index+1},'properties':{'pixelSize':width},'fields':'pixelSize'}})
     requests.append({'autoResizeDimensions':{'dimensions':{'sheetId':dsid,'dimension':'ROWS','startIndex':0,'endIndex':len(directory)}}})
     requests.append({'updateSheetProperties':{'properties':{'sheetId':dsid,'gridProperties':{'frozenRowCount':4}},'fields':'gridProperties.frozenRowCount'}})
-    from directory_changes import change_requests
-    requests.extend(change_requests(sheet, directory_before,
-                                   [r[1] for r in directory[4:len(directory)-6]], height))
+    from directory_changes import MARKER, change_requests
+    snapshot_owned = len(directory_before) > 3 and directory_before[3][4:5] == [MARKER]
+    previous_rows = [[value if value is not None else '' for value in row[:4]]
+                     + [''] * (4 - len(row[:4])) for row in directory_before[4:total_index+1]]
+    if not snapshot_owned or previous_rows != directory[4:total_index+1]:
+        requests.extend(change_requests(
+            sheet, directory_before, [row[1] for row in directory[4:total_index+1]], height,
+        ))
     return requests
 
 def make_requests(meta,rows,missing,catalog,report,exemplar,directory_before):

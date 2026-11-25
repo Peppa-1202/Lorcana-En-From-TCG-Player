@@ -3,15 +3,16 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: '导出表内 ID、预览 / 补录浏览器批次，或刷新目录'
+        description: '导出 ID、补录卡牌、刷新目录或保存全量核查结果'
         type: choice
         default: import_cards
         options:
           - import_cards
           - export_ids
           - refresh_directory
+          - audit_catalog
       batch_json:
-        description: '仅 import_cards 模式需要粘贴浏览器批次'
+        description: 'import_cards 粘贴卡牌批次，audit_catalog 粘贴全量核查凭据'
         required: false
         type: string
       apply:
@@ -50,6 +51,8 @@ jobs:
             args+=(--export-ids)
           elif [ "$MODE" = "refresh_directory" ]; then
             args+=(--refresh-directory)
+          elif [ "$MODE" = "audit_catalog" ]; then
+            args+=(--audit-catalog)
           fi
           if [ "$APPLY" = "true" ] && [ "$MODE" != "export_ids" ]; then
             args+=(--apply)
