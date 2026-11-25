@@ -2,10 +2,14 @@ name: Check and update LorcanaPlayer
 on:
   workflow_dispatch:
     inputs:
+      batch_json:
+        description: '粘贴从浏览器复制的 LorcanaPlayer 批次 JSON'
+        required: true
+        type: string
       apply:
-        description: '补录 LorcanaPlayer 缺失卡牌并更新目录（关闭则仅检查）'
+        description: '补录缺失卡牌（默认只检查）'
         type: boolean
-        default: true
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -14,7 +18,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -24,17 +28,18 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Test safety checks
         run: python -m unittest discover -s tests -v
-      - name: Audit and sync LorcanaPlayer
+      - name: Check or import LorcanaPlayer browser batch
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}
           APPLY: ${{ inputs.apply }}
+          LORCANAPLAYER_BATCH_JSON: ${{ inputs.batch_json }}
         shell: bash
         run: |
           if [ "$APPLY" = "true" ]; then
-            python -u sync_lorcanaplayer.py --apply
+            python -u import_lorcanaplayer.py --apply
           else
-            python -u sync_lorcanaplayer.py
+            python -u import_lorcanaplayer.py
           fi
       - name: Summary
         if: always()

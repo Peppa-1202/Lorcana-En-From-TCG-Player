@@ -83,28 +83,31 @@ GitHub Actions 自动安装 Tesseract，无需额外密钥。本地运行需先�
 
 AB 列“促销卡系列代码”由 AA 列完整卡牌代码自动提取，例如 `20/C2·EN·10` → `C2`、`24A/P2·EN·7` → `P2`。每次 apply 同步刷新，兼容原 26 列和 27 列表格。仅处理 Promo 商品；同子类多代码组合只保留一个子类。无编号记录填“无编号”，无法确定时填“待核查”。
 
-## LorcanaPlayer 独立核查与目录
+## LorcanaPlayer 浏览器取数与增量补录
 
-新增工作流 **Actions → Check and update LorcanaPlayer → Run workflow**，沿用同一 `GOOGLE_SERVICE_ACCOUNT_JSON` Secret 和 `SPREADSHEET_ID` Variable。勾选 `apply` 补录并更新目录，关闭则只生成核查文件。不改变 TCGplayer 工作流。
+GitHub Actions 的 **Check and update LorcanaPlayer** 接收浏览器导出的批次。沿用 `GOOGLE_SERVICE_ACCOUNT_JSON` 和 `SPREADSHEET_ID`。
 
-```bash
-python -u sync_lorcanaplayer.py --apply
-```
+### 在 Edge 或 Chrome 导出
 
-- 来源：<https://lorcanaplayer.com/cards/>；逐页核对完整目录的页面 ID 和详情链接，不能仅凭总数相同判定完整。
-- 目标：`洛卡纳Player`（26 列）与 `洛卡纳Player目录`。重复页面 ID、ID 与链接冲突、目录分页重复/缺失、网站总数变动、字段结构变化都会停止写入。
-- 对缺失页面读取详情，提取卡名、系列、编号、属性、技能、画师、日期及图片链接。内嵌图标保留为 `[Ink]`、`[Exert]` 等文本。来源没有的信息留空。
-- 优先填补整行完全空白的位置，再追加到末尾；不覆盖已有卡牌、不删除仅表格存在的记录。写入前重读，防止抓取期间表格变化；批量提交后回读验证。
-- 目录包含“系列代码、系列 / 产品名称、LorcanaPlayer 记录数、备注”。系列代码优先采用已知主系列/任务编号，Promo 等根据卡号后缀提取；不确定时留空。目录是脚本维护的统计区，每次 apply 重建 A:D；请勿在该区域添加手写内容。
-- 部分页面同时属于多个系列，在各自系列中分别计数；目录合计按页面 ID 去重。网站筛选器的系列计数合计可能高于总卡牌数。目录会标出与网站分类计数不一致的情况，不虚构或改写已有归属。
-- 完整性针对网站当前公开目录，不保证已存在的所有属性都是最新值。数据按页面 ID 计数，普通、异画、Promo 等是否分开沿用网站页面结构。
-- `output/player/` 保存目录快照、缺失详情、核查报告，Actions 附件保留 30 天。首次大量补录耗时较长，后续仅抓取缺失详情。HTTP 403/401 不绕过验证，会停止；超时/429/临时服务错误有限重试。
-- 本地同一个 output 目录保留详情缓存用于失败后续跑；清空 `output/player/details/` 可重新抓取尚未写入的详情。`--existing-json` / `--catalog-json` 仅供离线核查，不允许与 `--apply` 同用。
+1. 打开 LorcanaPlayer 的单张卡牌详情页，按 **F12** 打开开发人员工具。
+2. 在 **源代码 / Sources → 代码段 / Snippets** 新建代码段，复制 [export_lorcanaplayer.js](export_lorcanaplayer.js) 的内容保存。只需设置一次。
+3. 在同一个标签页依次打开要补的卡牌详情页，每次运行代码段。代码段把当前卡加入本批，并将整批 JSON 复制到剪贴板。重复采集同一页面 ID 会更新这一条。
+4. 这一批提交后，在该标签页的开发人员工具 **控制台 / Console** 执行 `sessionStorage.removeItem('lorcanaplayer-import-v1')`，再开始下一批。关闭标签页前请先保存或提交剪贴板里的批次。
+
+### 在 GitHub 检查并补录
+
+1. 点 **Actions → Check and update LorcanaPlayer → Run workflow**，把剪贴板内容粘贴到 **batch_json**，保持 **apply** 关闭。
+2. 在执行记录的 **Summary** 查看 `missing_cards`（待新增的编号、名称和系列）和 `existing_count`（已收录数）。
+3. 确认后用同一批 JSON 新开一次运行，勾选 **apply**。脚本再次按页面 ID 和链接比对，只给 `洛卡纳Player` 明细新增缺失行。重复提交一批已补录的卡牌时，新增数为 0。
+
+一次浏览器批次最多 60 KB。上传内容只应包含卡牌数据，GitHub 表单不需要输入凭据。异画、普通与 Promo 均沿用网站页面 ID；内嵌图标保留为 `[Ink]`、`[Exert]` 等文本。来源页面没有的字段留空。
+
+批次只覆盖提交的卡牌，Summary 的 `directory_updated` 为 `false`。`洛卡纳Player目录` 仍显示上一次完整核查的统计。需要完整统计时，原有的本地脚本 `sync_lorcanaplayer.py` 可以继续用完整实时目录做核对，前提是运行环境能访问网站。仅凭批次无法重建该目录。
 
 
 ## 目录变化颜色（两个 workflow 通用）
 
-每次启用 `apply` 并成功更新后，两个脚本分别在自己的目录 A:D 设置原生条件格式：
+每次完整同步并成功更新目录后，脚本在自己的目录 A:D 设置原生条件格式：
 - 浅绿色：本次新增的系列或 DLPC 子类。
 - 浅黄色：与更新前相比，记录数、系列代码或备注改变的行（包含合计）。
 - 下次更新重新比较；没有变化的行恢复原来的底色，不累计历史高亮。只检查、不写入时保留原状态。

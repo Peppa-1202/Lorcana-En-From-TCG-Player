@@ -130,11 +130,30 @@ def detail_row(html, expected):
         raise RuntimeError('Missing required card detail fields')
     image=article.select_one('img.card')
     image_url=image.parent.get('href') if image and image.parent.name=='a' else image.get('src','') if image else ''
+    row = build_detail_row(
+        expected['id'], expected['url'], heading.get_text(' ', strip=True),
+        fields, image_url, datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat(),
+        'LorcanaPlayer 完整性核查补录',
+    )
+    return row, sets
+
+
+def build_detail_row(pid, url, title, fields, image_url, collected_on, note):
     def number(key):
-        value=fields.get(key,'')
-        return int(value) if re.fullmatch(r'\d+',value) else value
-    row=[expected['id'],fields['Set'],fields.get('Card ID',''),heading.get_text(' ',strip=True),fields['Name'],fields.get('Version',''),fields.get('Rarity',''),fields.get('Ink Color',''),number('Ink Cost'),fields.get('Inkwell',''),fields['Card Type'],fields.get('Classifications',''),number('Strength'),number('Willpower'),number('Lore'),number('Move Cost'),fields.get('Card Text',''),fields.get('Flavor Text',''),fields.get('Keywords + Abilities',''),fields.get('Illustrator',''),fields.get('Franchise',''),fields.get('Release Date',''),expected['url'],image_url,datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat(),'LorcanaPlayer 完整性核查补录']
-    return row,sets
+        value = fields.get(key, '')
+        return int(value) if re.fullmatch(r'\d+', value) else value
+
+    return [
+        pid, fields['Set'], fields.get('Card ID', ''), title, fields['Name'],
+        fields.get('Version', ''), fields.get('Rarity', ''), fields.get('Ink Color', ''),
+        number('Ink Cost'), fields.get('Inkwell', ''), fields['Card Type'],
+        fields.get('Classifications', ''), number('Strength'), number('Willpower'),
+        number('Lore'), number('Move Cost'), fields.get('Card Text', ''),
+        fields.get('Flavor Text', ''), fields.get('Keywords + Abilities', ''),
+        fields.get('Illustrator', ''), fields.get('Franchise', ''),
+        fields.get('Release Date', ''), url, image_url, collected_on, note,
+    ]
+
 
 def compare(rows,catalog):
     if not rows or rows[0]!=HEADERS: raise RuntimeError('LorcanaPlayer headers changed')
@@ -217,14 +236,18 @@ def plan_rows(rows,missing):
         writes.append((index,row))
     return result,writes
 
-def make_requests(meta,rows,missing,catalog,report,exemplar,directory_before):
+def make_detail_requests(detail, rows, missing, exemplar):
     from sheets_sync import cell
-    props={s['properties']['title']:s for s in meta['sheets']}
-    detail=props[DETAIL];did=detail['properties']['sheetId'];dprop=props[DIRECTORY]['properties'];dsid=dprop['sheetId']
-    after,writes=plan_rows(rows,missing);directory=directory_rows(after,catalog,report);requests=[]
-    for prop,count in [(detail['properties'],len(after)),(dprop,len(directory))]:
-        if count>prop['gridProperties']['rowCount']:
-            requests.append({'appendDimension':{'sheetId':prop['sheetId'],'dimension':'ROWS','length':count-prop['gridProperties']['rowCount']}})
+
+    properties = detail['properties']
+    did = properties['sheetId']
+    after, writes = plan_rows(rows, missing)
+    requests = []
+    if len(after) > properties['gridProperties']['rowCount']:
+        requests.append({'appendDimension': {
+            'sheetId': did, 'dimension': 'ROWS',
+            'length': len(after) - properties['gridProperties']['rowCount'],
+        }})
     for source in exemplar:
         if source.get('dataValidation') or source.get('chipRuns') or 'formulaValue' in source.get('userEnteredValue',{}):
             raise RuntimeError('Structured template changed; review before writing')
@@ -232,9 +255,10 @@ def make_requests(meta,rows,missing,catalog,report,exemplar,directory_before):
     for index,row in writes:
         if not groups or index!=groups[-1][-1][0]+1:groups.append([])
         groups[-1].append((index,row))
-    exemplar_index=max(i for i,r in enumerate(rows) if r and r[0])
+    exemplar_index = max((i for i, r in enumerate(rows[1:], 1) if r and r[0]), default=None)
     for group in groups:
-        requests.append({'copyPaste':{'source':{'sheetId':did,'startRowIndex':exemplar_index,'endRowIndex':exemplar_index+1,'startColumnIndex':0,'endColumnIndex':26},'destination':{'sheetId':did,'startRowIndex':group[0][0],'endRowIndex':group[-1][0]+1,'startColumnIndex':0,'endColumnIndex':26},'pasteType':'PASTE_FORMAT'}})
+        if exemplar_index is not None:
+            requests.append({'copyPaste':{'source':{'sheetId':did,'startRowIndex':exemplar_index,'endRowIndex':exemplar_index+1,'startColumnIndex':0,'endColumnIndex':26},'destination':{'sheetId':did,'startRowIndex':group[0][0],'endRowIndex':group[-1][0]+1,'startColumnIndex':0,'endColumnIndex':26},'pasteType':'PASTE_FORMAT'}})
         new_cells=[]
         for index,row in group:
             cells=[]
@@ -244,6 +268,28 @@ def make_requests(meta,rows,missing,catalog,report,exemplar,directory_before):
                 cells.append(c)
             new_cells.append({'values':cells})
         requests.append({'updateCells':{'start':{'sheetId':did,'rowIndex':group[0][0],'columnIndex':0},'rows':new_cells,'fields':'userEnteredValue,userEnteredFormat.textFormat.link'}})
+    for table in detail.get('tables',[]):
+        rng=table['range']
+        if rng.get('endColumnIndex')==26 and rng.get('endRowIndex')==len(rows):requests.append({'updateTable':{'table':{'tableId':table['tableId'],'range':{**rng,'endRowIndex':len(after)}},'fields':'range'}})
+    basic=detail.get('basicFilter')
+    if basic and basic['range'].get('endRowIndex')==len(rows):
+        basic=deepcopy(basic);basic['range']['endRowIndex']=len(after)
+        if basic.get('filterSpecs'):basic.pop('criteria',None)
+        requests.append({'setBasicFilter':{'filter':basic}})
+    return requests, after
+
+
+def make_requests(meta,rows,missing,catalog,report,exemplar,directory_before):
+    from sheets_sync import cell
+    props={s['properties']['title']:s for s in meta['sheets']}
+    dprop=props[DIRECTORY]['properties'];dsid=dprop['sheetId']
+    requests, after = make_detail_requests(props[DETAIL], rows, missing, exemplar)
+    directory = directory_rows(after, catalog, report)
+    if len(directory) > dprop['gridProperties']['rowCount']:
+        requests.append({'appendDimension': {
+            'sheetId': dsid, 'dimension': 'ROWS',
+            'length': len(directory) - dprop['gridProperties']['rowCount'],
+        }})
     height=max(len(directory),len(directory_before))
     data=directory+[['','','','']]*(height-len(directory))
     requests.append({'updateCells':{'range':{'sheetId':dsid,'startRowIndex':0,'endRowIndex':height,'startColumnIndex':0,'endColumnIndex':4},'rows':[{'values':[cell(v) for v in r]} for r in data],'fields':'userEnteredValue'}})
@@ -260,14 +306,6 @@ def make_requests(meta,rows,missing,catalog,report,exemplar,directory_before):
         requests.append({'updateDimensionProperties':{'range':{'sheetId':dsid,'dimension':'COLUMNS','startIndex':index,'endIndex':index+1},'properties':{'pixelSize':width},'fields':'pixelSize'}})
     requests.append({'autoResizeDimensions':{'dimensions':{'sheetId':dsid,'dimension':'ROWS','startIndex':0,'endIndex':len(directory)}}})
     requests.append({'updateSheetProperties':{'properties':{'sheetId':dsid,'gridProperties':{'frozenRowCount':4}},'fields':'gridProperties.frozenRowCount'}})
-    for table in detail.get('tables',[]):
-        rng=table['range']
-        if rng.get('endColumnIndex')==26 and rng.get('endRowIndex')==len(rows):requests.append({'updateTable':{'table':{'tableId':table['tableId'],'range':{**rng,'endRowIndex':len(after)}},'fields':'range'}})
-    basic=detail.get('basicFilter')
-    if basic and basic['range'].get('endRowIndex')==len(rows):
-        basic=deepcopy(basic);basic['range']['endRowIndex']=len(after)
-        if basic.get('filterSpecs'):basic.pop('criteria',None)
-        requests.append({'setBasicFilter':{'filter':basic}})
     from directory_changes import change_requests
     requests.extend(change_requests(props[DIRECTORY], directory_before,
                                    [r[1] for r in directory[4:len(directory)-6]], height))
