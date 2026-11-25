@@ -54,14 +54,28 @@ class BrowserImportTests(unittest.TestCase):
     def test_detail_requests_retain_existing_rows_and_exclude_directory(self):
         earlier = parse_batch(batch(card('9', 'earlier')))['9']
         new = parse_batch(batch(card()))['10']
-        detail = {'properties': {'sheetId': 7, 'gridProperties': {'rowCount': 2}}}
-        requests, expected = make_detail_requests(detail, [HEADERS, earlier], [new], [])
+        detail = {
+            'properties': {'sheetId': 7, 'gridProperties': {'rowCount': 2}},
+            'basicFilter': {
+                'range': {'sheetId': 7, 'startRowIndex': 0, 'endRowIndex': 2},
+                'filterSpecs': [{'columnIndex': 0, 'filterCriteria': {'hiddenValues': ['9']}}],
+            },
+        }
+        template = [{} for _ in HEADERS]
+        template[22] = {'userEnteredFormat': {
+            'textFormat': {'fontSize': 12, 'link': {'uri': earlier[22]}}
+        }}
+        requests, expected = make_detail_requests(detail, [HEADERS, earlier], [new], template)
         self.assertEqual(expected, [HEADERS, earlier, new])
         self.assertEqual(requests[0]['appendDimension']['length'], 1)
-        self.assertEqual(requests[2]['updateCells']['start']['sheetId'], 7)
-        self.assertEqual(requests[2]['updateCells']['start']['rowIndex'], 2)
-        self.assertEqual(requests[2]['updateCells']['rows'][0]['values'][22]
-                         ['userEnteredFormat']['textFormat']['link']['uri'], new[22])
+        self.assertNotIn('copyPaste', [key for request in requests for key in request])
+        write = requests[1]['updateCells']
+        self.assertEqual(write['start']['sheetId'], 7)
+        self.assertEqual(write['start']['rowIndex'], 2)
+        self.assertEqual(write['rows'][0]['values'][22]['userEnteredFormat']['textFormat'],
+                         {'fontSize': 12, 'link': {'uri': new[22]}})
+        self.assertEqual(requests[2]['setBasicFilter']['filter']['filterSpecs'],
+                         detail['basicFilter']['filterSpecs'])
 
     def test_preview_never_writes(self):
         with tempfile.TemporaryDirectory() as directory:

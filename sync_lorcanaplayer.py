@@ -251,23 +251,35 @@ def make_detail_requests(detail, rows, missing, exemplar):
     for source in exemplar:
         if source.get('dataValidation') or source.get('chipRuns') or 'formulaValue' in source.get('userEnteredValue',{}):
             raise RuntimeError('Structured template changed; review before writing')
-    groups=[]
-    for index,row in writes:
-        if not groups or index!=groups[-1][-1][0]+1:groups.append([])
-        groups[-1].append((index,row))
-    exemplar_index = max((i for i, r in enumerate(rows[1:], 1) if r and r[0]), default=None)
+    groups = []
+    for index, row in writes:
+        if not groups or index != groups[-1][-1][0] + 1:
+            groups.append([])
+        groups[-1].append((index, row))
+
+    # copyPaste rejects ranges containing rows hidden by a filter. Read the
+    # template formats once and write them with each new cell by grid index.
+    formats = [deepcopy(source.get('userEnteredFormat', {})) for source in exemplar]
+    for format_value in formats:
+        format_value.get('textFormat', {}).pop('link', None)
     for group in groups:
-        if exemplar_index is not None:
-            requests.append({'copyPaste':{'source':{'sheetId':did,'startRowIndex':exemplar_index,'endRowIndex':exemplar_index+1,'startColumnIndex':0,'endColumnIndex':26},'destination':{'sheetId':did,'startRowIndex':group[0][0],'endRowIndex':group[-1][0]+1,'startColumnIndex':0,'endColumnIndex':26},'pasteType':'PASTE_FORMAT'}})
-        new_cells=[]
-        for index,row in group:
-            cells=[]
-            for col,value in enumerate(row):
-                c=cell(value)
-                if col in (22,23) and value:c['userEnteredFormat']={'textFormat':{'link':{'uri':value}}}
-                cells.append(c)
-            new_cells.append({'values':cells})
-        requests.append({'updateCells':{'start':{'sheetId':did,'rowIndex':group[0][0],'columnIndex':0},'rows':new_cells,'fields':'userEnteredValue,userEnteredFormat.textFormat.link'}})
+        new_cells = []
+        for _, row in group:
+            cells = []
+            for col, value in enumerate(row):
+                target = cell(value)
+                format_value = deepcopy(formats[col]) if col < len(formats) else {}
+                if col in (22, 23) and value:
+                    format_value.setdefault('textFormat', {})['link'] = {'uri': value}
+                if format_value:
+                    target['userEnteredFormat'] = format_value
+                cells.append(target)
+            new_cells.append({'values': cells})
+        requests.append({'updateCells': {
+            'start': {'sheetId': did, 'rowIndex': group[0][0], 'columnIndex': 0},
+            'rows': new_cells,
+            'fields': 'userEnteredValue,userEnteredFormat',
+        }})
     for table in detail.get('tables',[]):
         rng=table['range']
         if rng.get('endColumnIndex')==26 and rng.get('endRowIndex')==len(rows):requests.append({'updateTable':{'table':{'tableId':table['tableId'],'range':{**rng,'endRowIndex':len(after)}},'fields':'range'}})
