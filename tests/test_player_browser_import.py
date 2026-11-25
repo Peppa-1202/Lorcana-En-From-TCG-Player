@@ -5,7 +5,10 @@ import unittest
 from unittest.mock import Mock, patch
 
 from import_lorcanaplayer import apply_rows, audit_rows, main, parse_batch
-from sync_lorcanaplayer import DETAIL, HEADERS, make_detail_requests
+from sync_lorcanaplayer import (
+    DETAIL, DIRECTORY, DIRECTORY_TOTAL, HEADERS, directory_rows, incremental_directory,
+    make_detail_requests,
+)
 
 
 def card(pid='10', slug='card-ten'):
@@ -92,19 +95,82 @@ class BrowserImportTests(unittest.TestCase):
             self.assertEqual(report['missing_ids'], ['10'])
             service.batchUpdate.assert_not_called()
 
-    def test_apply_verifies_write_and_repeat_is_no_op(self):
-        rows = [HEADERS]
+    def test_apply_verifies_both_tabs_and_repeat_is_no_op(self):
+        before = [HEADERS]
         added = [parse_batch(batch(card()))['10']]
+        old_directory = directory_rows(
+            before, {'sets': {'Challenge Set 3': 0}, 'total': 0},
+            {'missing_ids': [], 'sheet_only_ids': []},
+        )
+        expected = incremental_directory(before + added, old_directory)
         service = Mock()
         service.get.return_value.execute.return_value = {'sheets': [
-            {'properties': {'title': DETAIL, 'sheetId': 7, 'gridProperties': {'rowCount': 1}}}
+            {'properties': {'title': DETAIL, 'sheetId': 7, 'gridProperties': {'rowCount': 1}}},
+            {'properties': {'title': DIRECTORY, 'sheetId': 8, 'gridProperties': {'rowCount': 100}}},
         ]}
-        with patch('import_lorcanaplayer.read_rows', side_effect=[rows, rows + added]):
-            apply_rows(service, 'test', rows, added)
+        with patch('import_lorcanaplayer.read_rows', side_effect=[before, before + added]), \
+                patch('import_lorcanaplayer.read_directory', side_effect=[old_directory, expected]):
+            self.assertTrue(apply_rows(service, 'test', before, added))
         service.batchUpdate.assert_called_once()
+        requests = service.batchUpdate.call_args.kwargs['body']['requests']
+        self.assertIn(7, [r['updateCells']['start']['sheetId']
+                          for r in requests if 'start' in r.get('updateCells', {})])
+        rules = [r['addConditionalFormatRule']['rule'] for r in requests if 'addConditionalFormatRule' in r]
+        self.assertEqual(len(rules), 2)
+        self.assertEqual(rules[0]['ranges'][0]['sheetId'], 8)
+        self.assertEqual(rules[0]['ranges'][0]['endRowIndex'], 6)
         service.reset_mock()
-        apply_rows(service, 'test', rows + added, [])
+        self.assertFalse(apply_rows(service, 'test', before + added, []))
         service.batchUpdate.assert_not_called()
+
+    def test_refresh_counts_without_claiming_a_new_site_audit(self):
+        before = [
+            HEADERS,
+            ['1', 'The First Chapter', '1/204'],
+            ['2', 'Challenge Set 3', '1/C3'],
+            ['3', 'D23 Collection', '1/D23'],
+        ]
+        old_directory = directory_rows(
+            before, {'sets': {'The First Chapter': 1, 'Challenge Set 3': 1, 'D23 Collection': 1}, 'total': 3},
+            {'missing_ids': [], 'sheet_only_ids': []},
+        )
+        old_audit = next(row for row in old_directory if row[0] == '最近完整性核查')
+        old_audit[1] = '2026-11-17'
+        rows = before + [
+            ['4', 'Challenge Set 3', '2/C3'],
+            ['5', 'D23 Collection Challenge Set 3', '2/D23'],
+            ['6', 'New Promo Set', '1/NEW'],
+        ]
+        refreshed = incremental_directory(rows, old_directory)
+        counts = {row[1]: row[2] for row in refreshed[4:] if row[1]}
+        self.assertEqual(counts['Challenge Set 3'], 3)
+        self.assertEqual(counts['D23 Collection'], 2)
+        self.assertEqual(counts[DIRECTORY_TOTAL], 6)
+        self.assertEqual(refreshed[4], old_directory[4])
+        self.assertIn(['NEW', 'New Promo Set', 1, '按当前明细统计。'], refreshed)
+        self.assertIn(['上次核查的网站卡牌数', 3, '', ''], refreshed)
+        self.assertIn(['本次合计变化', 3, '', ''], refreshed)
+        self.assertIn(old_audit, refreshed)
+        self.assertIsNone(incremental_directory(rows, refreshed))
+
+    def test_refresh_never_touches_detail_cells(self):
+        rows = [HEADERS, ['10', 'Challenge Set 3', '2/C3']]
+        old_directory = directory_rows(
+            [HEADERS], {'sets': {'Challenge Set 3': 0}, 'total': 0},
+            {'missing_ids': [], 'sheet_only_ids': []},
+        )
+        expected = incremental_directory(rows, old_directory)
+        service = Mock()
+        service.get.return_value.execute.return_value = {'sheets': [
+            {'properties': {'title': DIRECTORY, 'sheetId': 8, 'gridProperties': {'rowCount': 100}}},
+        ]}
+        with patch('import_lorcanaplayer.read_rows', return_value=rows), \
+                patch('import_lorcanaplayer.read_directory', side_effect=[old_directory, expected]):
+            self.assertTrue(apply_rows(service, 'test', rows, [], refresh_directory=True))
+        requests = service.batchUpdate.call_args.kwargs['body']['requests']
+        self.assertNotIn('copyPaste', [key for request in requests for key in request])
+        self.assertEqual({p.get('start', p.get('range'))['sheetId']
+                          for r in requests if (p := r.get('updateCells'))}, {8})
 
     def test_refuses_a_formula_in_a_visually_empty_target(self):
         service = Mock()

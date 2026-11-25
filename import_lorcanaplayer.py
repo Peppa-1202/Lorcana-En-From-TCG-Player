@@ -15,8 +15,8 @@ from zoneinfo import ZoneInfo
 
 from sheets_sync import connect
 from sync_lorcanaplayer import (
-    DETAIL, HEADERS, build_detail_row, compare, make_detail_requests, plan_rows,
-    read_rows,
+    DETAIL, DIRECTORY, HEADERS, build_detail_row, compare, incremental_directory,
+    make_detail_requests, make_directory_requests, plan_rows, read_rows,
 )
 
 
@@ -112,12 +112,7 @@ def audit_rows(rows, records):
     }
 
 
-def apply_rows(service, spreadsheet_id, before, missing):
-    if not missing:
-        return
-    if read_rows(service, spreadsheet_id) != before:
-        raise RuntimeError('Sheet changed during audit; rerun to refresh the preview')
-    properties = service.get(spreadsheetId=spreadsheet_id, includeGridData=False).execute()
+def detail_updates(service, spreadsheet_id, properties, before, missing):
     detail = next(s for s in properties['sheets'] if s['properties']['title'] == DETAIL)
     last_card = max((i for i, row in enumerate(before[1:], 2) if row and row[0]), default=0)
     exemplar = []
@@ -141,15 +136,50 @@ def apply_rows(service, spreadsheet_id, before, missing):
         for area in dest.get('valueRanges', []):
             if any(value not in ('', None) for row in area.get('values', []) for value in row):
                 raise RuntimeError('A target row contains existing data or a formula; review before writing')
+    return requests, expected
+
+
+def read_directory(service, spreadsheet_id, end_cell):
+    return service.values().get(
+        spreadsheetId=spreadsheet_id, range=f"'{DIRECTORY}'!A1:{end_cell}",
+        valueRenderOption='UNFORMATTED_VALUE',
+    ).execute().get('values', [])
+
+
+def directory_plan(service, spreadsheet_id, meta, rows):
+    sheet = next(sheet for sheet in meta['sheets'] if sheet['properties']['title'] == DIRECTORY)
+    height = sheet['properties']['gridProperties']['rowCount']
+    before = read_directory(service, spreadsheet_id, f'H{height}')
+    return sheet, before, incremental_directory(rows, before)
+
+
+def normalize(rows, width):
+    return [[value if value is not None else '' for value in row]
+            + [''] * (width - len(row)) for row in rows]
+
+
+def apply_rows(service, spreadsheet_id, before, missing, *, refresh_directory=False):
+    if not missing and not refresh_directory:
+        return False
+    if read_rows(service, spreadsheet_id) != before:
+        raise RuntimeError('Sheet changed during audit; rerun to refresh the preview')
+    meta = service.get(spreadsheetId=spreadsheet_id, includeGridData=False).execute()
+    requests, expected = detail_updates(service, spreadsheet_id, meta, before, missing) if missing else ([], before)
+    directory_sheet, directory_before, directory_after = directory_plan(service, spreadsheet_id, meta, expected)
+    if directory_after is not None:
+        requests.extend(make_directory_requests(directory_sheet, directory_after, directory_before))
+    if not requests:
+        return False
     service.batchUpdate(spreadsheetId=spreadsheet_id, body={'requests': requests}).execute(num_retries=0)
+
     actual = read_rows(service, spreadsheet_id)
-
-    def normalize(rows):
-        return [[value if value is not None else '' for value in row]
-                + [''] * (len(HEADERS) - len(row)) for row in rows]
-
-    if normalize(actual) != normalize(expected):
+    if normalize(actual, len(HEADERS)) != normalize(expected, len(HEADERS)):
         raise RuntimeError('Detail write verification failed; inspect the sheet before retrying')
+    if directory_after is not None:
+        actual_directory = read_directory(service, spreadsheet_id, f'D{len(directory_after)}')
+        if normalize(actual_directory, 4) != normalize(directory_after, 4):
+            raise RuntimeError('Directory write verification failed; inspect the sheet before retrying')
+    return directory_after is not None
 
 
 def existing_ids(rows):
@@ -164,12 +194,15 @@ def main():
     parser.add_argument('--spreadsheet-id', default=os.getenv('SPREADSHEET_ID', ''))
     parser.add_argument('--output', type=Path, default=Path('output/player'))
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument('--apply', action='store_true')
     mode.add_argument('--export-ids', action='store_true')
+    mode.add_argument('--refresh-directory', action='store_true')
+    parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     if not args.spreadsheet_id:
         parser.error('Set SPREADSHEET_ID')
     if args.export_ids:
+        if args.apply:
+            parser.error('--export-ids is read-only')
         service = connect()
         index = existing_ids(read_rows(service, args.spreadsheet_id))
         args.output.mkdir(parents=True, exist_ok=True)
@@ -178,18 +211,33 @@ def main():
         )
         print(f"Exported {len(index['ids'])} existing LorcanaPlayer page IDs", flush=True)
         return
-    try:
-        raw = args.batch_file.read_text(encoding='utf-8-sig') if args.batch_file else os.getenv('LORCANAPLAYER_BATCH_JSON', '')
-        records = parse_batch(raw)
-    except (OSError, ValueError) as exc:
-        parser.error(str(exc))
-
-    service = connect()
-    rows = read_rows(service, args.spreadsheet_id)
-    missing, report = audit_rows(rows, records)
-    if args.apply:
-        apply_rows(service, args.spreadsheet_id, rows, missing)
-        report.update(applied=True, rows_added=len(missing))
+    if args.refresh_directory:
+        service = connect()
+        rows = read_rows(service, args.spreadsheet_id)
+        known = existing_ids(rows)
+        meta = service.get(spreadsheetId=args.spreadsheet_id, includeGridData=False).execute()
+        _, _, planned = directory_plan(service, args.spreadsheet_id, meta, rows)
+        updated = args.apply and apply_rows(service, args.spreadsheet_id, rows, [], refresh_directory=True)
+        report = {
+            'mode': 'directory_refresh',
+            'sheet_count': len(known['ids']),
+            'directory_update_needed': planned is not None,
+            'directory_updated': updated,
+            'applied': args.apply,
+            'rows_added': 0,
+        }
+    else:
+        try:
+            raw = args.batch_file.read_text(encoding='utf-8-sig') if args.batch_file else os.getenv('LORCANAPLAYER_BATCH_JSON', '')
+            records = parse_batch(raw)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+        service = connect()
+        rows = read_rows(service, args.spreadsheet_id)
+        missing, report = audit_rows(rows, records)
+        if args.apply:
+            updated = apply_rows(service, args.spreadsheet_id, rows, missing)
+            report.update(applied=True, rows_added=len(missing), directory_updated=updated)
 
     args.output.mkdir(parents=True, exist_ok=True)
     report_json = json.dumps(report, ensure_ascii=False, indent=2)
