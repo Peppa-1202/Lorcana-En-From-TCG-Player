@@ -87,7 +87,16 @@ AB 列“促销卡系列代码”由 AA 列完整卡牌代码自动提取，例�
 
 GitHub Actions 的 **Check and update LorcanaPlayer** 接收浏览器导出的批次。沿用 `GOOGLE_SERVICE_ACCOUNT_JSON` 和 `SPREADSHEET_ID`。
 
-### 在 Edge 或 Chrome 导出
+### 自动找缺卡并批量取数
+
+1. 在 **Run workflow** 选择 **mode → export_ids**，`batch_json` 留空，运行后打开 **Summary**。复制“表内页面 ID”下方的整段 JSON。也可以下载运行的 **lorcanaplayer-audit**，解压得到 `existing-ids.json`。该模式只读表格。
+2. 第一次使用批量功能时，用最新版 [export_lorcanaplayer.js](export_lorcanaplayer.js) 替换 Edge/Chrome 中保存的片段代码。打开未筛选的 [卡牌目录](https://lorcanaplayer.com/cards/)，运行片段。
+3. 在弹出的“LorcanaPlayer 批量核查”面板粘贴表内 ID，或选择 `existing-ids.json`。点 **检查缺卡并批量取数**。浏览器逐页比对 ID，然后只打开缺卡的详情数据。扫描期间保留目录标签页，面板显示进度和缺卡名单。
+4. 点批次旁的 **复制到剪贴板**，回到 **Run workflow** 选择 **import_cards**，将输出粘贴到 `batch_json`。默认只预览，确认后勾选 `apply`。大批量会压缩，超过 GitHub 表单的容量时会自动拆分。每个拆分后的批次各提交一次。
+
+网站拒绝请求或目录检查未完成时，面板会停止并提示。若详情采集途中停止，可先导入已经打包的卡牌，下一次用新导出的表内 ID 继续比对。批量核查扫描的只有网站目录，已收录卡牌的详情无需重取。
+
+### 手动导出单张卡牌（可选）
 
 1. 打开 LorcanaPlayer 的单张卡牌详情页，按 **F12** 打开开发人员工具。
 2. 在 **源代码 / Sources → 代码段 / Snippets** 新建代码段，复制 [export_lorcanaplayer.js](export_lorcanaplayer.js) 的内容保存。只需设置一次。
@@ -100,7 +109,7 @@ GitHub Actions 的 **Check and update LorcanaPlayer** 接收浏览器导出的�
 2. 在执行记录的 **Summary** 查看 `missing_cards`（待新增的编号、名称和系列）和 `existing_count`（已收录数）。
 3. 确认后用同一批 JSON 新开一次运行，勾选 **apply**。脚本再次按页面 ID 和链接比对，只给 `洛卡纳Player` 明细新增缺失行。重复提交一批已补录的卡牌时，新增数为 0。
 
-一次浏览器批次最多 60 KB。上传内容只应包含卡牌数据，GitHub 表单不需要输入凭据。异画、普通与 Promo 均沿用网站页面 ID；内嵌图标保留为 `[Ink]`、`[Exert]` 等文本。来源页面没有的字段留空。
+GitHub 单个批次输入最多 60 KB。上传内容只应包含卡牌数据，GitHub 表单不需要输入凭据。异画、普通与 Promo 均沿用网站页面 ID；内嵌图标保留为 `[Ink]`、`[Exert]` 等文本。来源页面没有的字段留空。
 
 批次只覆盖提交的卡牌，Summary 的 `directory_updated` 为 `false`。`洛卡纳Player目录` 仍显示上一次完整核查的统计。需要完整统计时，原有的本地脚本 `sync_lorcanaplayer.py` 可以继续用完整实时目录做核对，前提是运行环境能访问网站。仅凭批次无法重建该目录。
 

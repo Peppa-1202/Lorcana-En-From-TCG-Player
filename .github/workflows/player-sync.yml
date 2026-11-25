@@ -2,9 +2,16 @@ name: Check and update LorcanaPlayer
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: '导出表内 ID，或预览 / 补录浏览器批次'
+        type: choice
+        default: import_cards
+        options:
+          - import_cards
+          - export_ids
       batch_json:
-        description: '粘贴从浏览器复制的 LorcanaPlayer 批次 JSON'
-        required: true
+        description: '粘贴浏览器批次，导出 ID 时留空'
+        required: false
         type: string
       apply:
         description: '补录缺失卡牌（默认只检查）'
@@ -32,11 +39,14 @@ jobs:
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}
+          MODE: ${{ inputs.mode }}
           APPLY: ${{ inputs.apply }}
           LORCANAPLAYER_BATCH_JSON: ${{ inputs.batch_json }}
         shell: bash
         run: |
-          if [ "$APPLY" = "true" ]; then
+          if [ "$MODE" = "export_ids" ]; then
+            python -u import_lorcanaplayer.py --export-ids
+          elif [ "$APPLY" = "true" ]; then
             python -u import_lorcanaplayer.py --apply
           else
             python -u import_lorcanaplayer.py
@@ -44,6 +54,11 @@ jobs:
       - name: Summary
         if: always()
         run: |
+          if [ -f output/player/existing-ids.json ]; then
+            printf '### 表内页面 ID\n\n下载下方的 lorcanaplayer-audit，解压后在浏览器选择 existing-ids.json。也可以复制这里的 JSON。\n\n```json\n' >> "$GITHUB_STEP_SUMMARY"
+            cat output/player/existing-ids.json >> "$GITHUB_STEP_SUMMARY"
+            printf '```\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ -f output/player/report.json ]; then
             printf '```json\n' >> "$GITHUB_STEP_SUMMARY"
             cat output/player/report.json >> "$GITHUB_STEP_SUMMARY"

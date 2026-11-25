@@ -1,10 +1,15 @@
 """Append a batch of LorcanaPlayer cards captured in a browser."""
 import argparse
+import base64
+import binascii
+import gzip
+from io import BytesIO
 from datetime import date, datetime
 import json
 import os
 from pathlib import Path
 import re
+import zlib
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -29,6 +34,16 @@ def source_url(value, path_pattern):
 def parse_batch(raw):
     if len(raw.encode('utf-8')) > 60000:
         raise ValueError('Browser batch is over 60 KB; split it into smaller batches')
+    if raw.startswith('gzip:'):
+        try:
+            compressed = base64.b64decode(raw[5:], validate=True)
+            with gzip.GzipFile(fileobj=BytesIO(compressed)) as stream:
+                raw = stream.read(2_000_001)
+            if len(raw) > 2_000_000:
+                raise ValueError('Unpacked browser batch is over 2 MB')
+            raw = raw.decode('utf-8')
+        except (binascii.Error, OSError, EOFError, UnicodeError, zlib.error) as exc:
+            raise ValueError('Invalid compressed browser batch') from exc
     batch = json.loads(raw)
     if (not isinstance(batch, dict) or type(batch.get('version')) is not int
             or batch['version'] != 1):
@@ -137,15 +152,32 @@ def apply_rows(service, spreadsheet_id, before, missing):
         raise RuntimeError('Detail write verification failed; inspect the sheet before retrying')
 
 
+def existing_ids(rows):
+    compare(rows, {'cards': {}})
+    ids = sorted((str(row[0]) for row in rows[1:] if row and row[0]), key=int)
+    return {'version': 1, 'ids': ids}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--batch-file', type=Path, help='Browser JSON file (instead of LORCANAPLAYER_BATCH_JSON)')
     parser.add_argument('--spreadsheet-id', default=os.getenv('SPREADSHEET_ID', ''))
     parser.add_argument('--output', type=Path, default=Path('output/player'))
-    parser.add_argument('--apply', action='store_true')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--apply', action='store_true')
+    mode.add_argument('--export-ids', action='store_true')
     args = parser.parse_args()
     if not args.spreadsheet_id:
         parser.error('Set SPREADSHEET_ID')
+    if args.export_ids:
+        service = connect()
+        index = existing_ids(read_rows(service, args.spreadsheet_id))
+        args.output.mkdir(parents=True, exist_ok=True)
+        (args.output / 'existing-ids.json').write_text(
+            json.dumps(index, separators=(',', ':')) + '\n', encoding='utf-8',
+        )
+        print(f"Exported {len(index['ids'])} existing LorcanaPlayer page IDs", flush=True)
+        return
     try:
         raw = args.batch_file.read_text(encoding='utf-8-sig') if args.batch_file else os.getenv('LORCANAPLAYER_BATCH_JSON', '')
         records = parse_batch(raw)
