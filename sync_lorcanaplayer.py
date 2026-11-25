@@ -29,6 +29,28 @@ def fetch(url):
             with urllib.request.urlopen(request,timeout=45) as response:
                 return response.read().decode('utf-8')
         except urllib.error.HTTPError as exc:
+            # Record only response diagnostics, never request credentials or cookies.
+            try:
+                body = exc.read(65536).decode('utf-8', errors='replace')
+                page = BeautifulSoup(body, 'html.parser')
+                title = page.title.get_text(' ', strip=True) if page.title else ''
+                for node in page.select('script, style'):
+                    node.decompose()
+                headers = {
+                    name: exc.headers.get(name)
+                    for name in ('Content-Type', 'Server', 'CF-Ray', 'CF-Mitigated', 'Retry-After')
+                    if exc.headers and exc.headers.get(name)
+                }
+                diagnostic = {
+                    'url': url,
+                    'status': exc.code,
+                    'headers': headers,
+                    'title': title,
+                    'body_excerpt': page.get_text(' ', strip=True)[:2000],
+                }
+                print('HTTP response diagnostic: ' + json.dumps(diagnostic, ensure_ascii=True), flush=True)
+            except Exception as diagnostic_error:
+                print('Unable to read HTTP response diagnostic: ' + type(diagnostic_error).__name__, flush=True)
             if exc.code not in (429,500,502,503,504) or attempt==2:
                 raise
             time.sleep(2**(attempt+1))
